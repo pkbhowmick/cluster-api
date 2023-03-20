@@ -54,9 +54,7 @@ type Client interface {
 	// Move moves all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
 	Move(options MoveOptions) error
 
-	// PlanUpgrade returns a set of suggested Upgrade plans for the cluster, and more specifically:
-	// - Upgrade to the latest version in the v1alpha3 series: ....
-	// - Upgrade to the latest version in the v1alpha4 series: ....
+	// PlanUpgrade returns a set of suggested Upgrade plans for the cluster.
 	PlanUpgrade(options PlanUpgradeOptions) ([]UpgradePlan, error)
 
 	// PlanCertManagerUpgrade returns a CertManagerUpgradePlan.
@@ -79,13 +77,13 @@ type Client interface {
 // AlphaClient exposes the alpha features in clusterctl high-level client library.
 type AlphaClient interface {
 	// RolloutRestart provides rollout restart of cluster-api resources
-	RolloutRestart(options RolloutOptions) error
+	RolloutRestart(options RolloutRestartOptions) error
 	// RolloutPause provides rollout pause of cluster-api resources
-	RolloutPause(options RolloutOptions) error
+	RolloutPause(options RolloutPauseOptions) error
 	// RolloutResume provides rollout resume of paused cluster-api resources
-	RolloutResume(options RolloutOptions) error
+	RolloutResume(options RolloutResumeOptions) error
 	// RolloutUndo provides rollout rollback of cluster-api resources
-	RolloutUndo(options RolloutOptions) error
+	RolloutUndo(options RolloutUndoOptions) error
 	// TopologyPlan dry runs the topology reconciler
 	TopologyPlan(options TopologyPlanOptions) (*TopologyPlanOutput, error)
 }

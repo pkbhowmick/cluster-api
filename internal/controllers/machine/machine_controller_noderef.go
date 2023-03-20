@@ -33,6 +33,8 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/api/v1beta1/index"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
+	"sigs.k8s.io/cluster-api/internal/util/ssa"
+	"sigs.k8s.io/cluster-api/internal/util/taints"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -124,15 +126,19 @@ func (r *Reconciler) reconcileNode(ctx context.Context, cluster *clusterv1.Clust
 		}
 	}
 
-	if !r.disableNodeLabelSync {
-		options := []client.PatchOption{
-			client.FieldOwner("capi-machine"),
-			client.ForceOwnership,
-		}
-		nodePatch := unstructuredNode(node.Name, node.UID, getManagedLabels(machine.Labels))
-		if err := remoteClient.Patch(ctx, nodePatch, client.Apply, options...); err != nil {
-			return ctrl.Result{}, errors.Wrap(err, "failed to apply patch label to the node")
-		}
+	updatedNode := unstructuredNode(node.Name, node.UID, getManagedLabels(machine.Labels))
+	err = ssa.Patch(ctx, remoteClient, machineManagerName, updatedNode, ssa.WithCachingProxy{Cache: r.ssaCache, Original: node})
+	if err != nil {
+		return ctrl.Result{}, errors.Wrap(err, "failed to apply labels to Node")
+	}
+	// Update `node` with the new version of the object.
+	if err := r.Client.Scheme().Convert(updatedNode, node, nil); err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to convert node to structured object %s", klog.KObj(node))
+	}
+
+	// Reconcile node taints
+	if err := r.reconcileNodeTaints(ctx, remoteClient, node); err != nil {
+		return ctrl.Result{}, errors.Wrapf(err, "failed to reconcile taints on Node %s", klog.KObj(node))
 	}
 
 	// Do the remaining node health checks, then set the node health to true if all checks pass.
@@ -261,4 +267,18 @@ func (r *Reconciler) getNode(ctx context.Context, c client.Reader, providerID *n
 	}
 
 	return &nodeList.Items[0], nil
+}
+
+func (r *Reconciler) reconcileNodeTaints(ctx context.Context, remoteClient client.Client, node *corev1.Node) error {
+	patchHelper, err := patch.NewHelper(node, remoteClient)
+	if err != nil {
+		return errors.Wrapf(err, "failed to create patch helper for Node %s", klog.KObj(node))
+	}
+	// Drop the NodeUninitializedTaint taint on the node.
+	if taints.RemoveNodeTaint(node, clusterv1.NodeUninitializedTaint) {
+		if err := patchHelper.Patch(ctx, node); err != nil {
+			return errors.Wrapf(err, "failed to patch Node %s to modify taints", klog.KObj(node))
+		}
+	}
+	return nil
 }

@@ -488,8 +488,12 @@ func httpCall(ctx context.Context, request, response runtime.Object, opts *httpC
 	})
 
 	resp, err := client.Do(httpRequest)
+
 	// Create http request metric.
-	runtimemetrics.RequestsTotal.Observe(httpRequest, resp, opts.hookGVH, err)
+	defer func() {
+		runtimemetrics.RequestsTotal.Observe(httpRequest, resp, opts.hookGVH, err, response)
+	}()
+
 	if err != nil {
 		return errCallingExtensionHandler(
 			errors.Wrapf(err, "http call failed"),
@@ -582,8 +586,8 @@ func defaultAndValidateDiscoveryResponse(cat *runtimecatalog.Catalog, discovery 
 		}
 		names[handler.Name] = true
 
-		// Name should match Kubernetes naming conventions - validated based on Kubernetes DNS1123 Subdomain rules.
-		if errStrings := validation.IsDNS1123Subdomain(handler.Name); len(errStrings) > 0 {
+		// Name should match Kubernetes naming conventions - validated based on DNS1123 label rules.
+		if errStrings := validation.IsDNS1123Label(handler.Name); len(errStrings) > 0 {
 			errs = append(errs, errors.Errorf("handler name %s is not valid: %s", handler.Name, errStrings))
 		}
 

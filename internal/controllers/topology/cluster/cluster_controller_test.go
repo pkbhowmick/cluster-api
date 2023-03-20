@@ -18,11 +18,14 @@ package cluster
 
 import (
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -784,16 +787,16 @@ func setupTestEnvForIntegrationTests(ns *corev1.Namespace) (func() error, error)
 	// Create a set of setupTestEnvForIntegrationTests from the objects above to add to the API server when the test environment starts.
 	// The objects are created for every test, though some e.g. infrastructureMachineTemplate2 may not be used in every test.
 	initObjs := []client.Object{
-		clusterClass,
-		clusterClassForRebase,
-		cluster1,
-		cluster2,
 		infrastructureClusterTemplate1,
 		infrastructureClusterTemplate2,
 		infrastructureMachineTemplate1,
 		infrastructureMachineTemplate2,
 		bootstrapTemplate,
 		controlPlaneTemplate,
+		clusterClass,
+		clusterClassForRebase,
+		cluster1,
+		cluster2,
 	}
 	cleanup := func() error {
 		// Delete Objects in reverse, because we cannot delete a ClusterCLass if it is still used by a Cluster.
@@ -1066,4 +1069,265 @@ func referenceExistsWithCorrectKindAndAPIVersion(reference *corev1.ObjectReferen
 		return fmt.Errorf("apiVersion %v does not match expected %v", reference.APIVersion, apiVersion.String())
 	}
 	return nil
+}
+
+func TestReconciler_DefaultCluster(t *testing.T) {
+	g := NewWithT(t)
+	classBuilder := builder.ClusterClass(metav1.NamespaceDefault, clusterClassName1)
+	topologyBase := builder.ClusterTopology().
+		WithClass(clusterClassName1).
+		WithVersion("1.22.2").
+		WithControlPlaneReplicas(3)
+	mdClass1 := builder.MachineDeploymentClass("worker1").
+		Build()
+	mdTopologyBase := builder.MachineDeploymentTopology("md1").
+		WithClass("worker1").
+		WithReplicas(3)
+	clusterBuilder := builder.Cluster(metav1.NamespaceDefault, clusterName1).
+		WithTopology(topologyBase.DeepCopy().Build())
+
+	tests := []struct {
+		name           string
+		clusterClass   *clusterv1.ClusterClass
+		initialCluster *clusterv1.Cluster
+		wantCluster    *clusterv1.Cluster
+	}{
+		{
+			name: "Default Cluster variables with values from ClusterClass",
+			clusterClass: classBuilder.DeepCopy().
+				WithStatusVariables(clusterv1.ClusterClassStatusVariable{
+					Name: "location",
+					Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+						{
+							Required: true,
+							From:     clusterv1.VariableDefinitionFromInline,
+							Schema: clusterv1.VariableSchema{
+								OpenAPIV3Schema: clusterv1.JSONSchemaProps{
+									Type:    "string",
+									Default: &apiextensionsv1.JSON{Raw: []byte(`"us-east"`)},
+								},
+							},
+						},
+					},
+				}).
+				Build(),
+			initialCluster: clusterBuilder.DeepCopy().
+				Build(),
+			wantCluster: clusterBuilder.DeepCopy().
+				WithTopology(topologyBase.DeepCopy().WithVariables(
+					clusterv1.ClusterVariable{Name: "location", Value: apiextensionsv1.JSON{Raw: []byte(`"us-east"`)}, DefinitionFrom: ""}).
+					Build()).
+				Build(),
+		},
+		{
+			name: "Do not default variable if a value is defined in the Cluster",
+			clusterClass: classBuilder.DeepCopy().
+				WithStatusVariables(clusterv1.ClusterClassStatusVariable{
+					Name: "location",
+					Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+						{
+							Required: true,
+							From:     clusterv1.VariableDefinitionFromInline,
+							Schema: clusterv1.VariableSchema{
+								OpenAPIV3Schema: clusterv1.JSONSchemaProps{
+									Type:    "string",
+									Default: &apiextensionsv1.JSON{Raw: []byte(`"us-east"`)},
+								},
+							},
+						},
+					},
+				}).
+				Build(),
+			initialCluster: clusterBuilder.DeepCopy().WithTopology(topologyBase.DeepCopy().WithVariables(
+				clusterv1.ClusterVariable{Name: "location", Value: apiextensionsv1.JSON{Raw: []byte(`"us-west"`)}}).
+				Build()).
+				Build(),
+			wantCluster: clusterBuilder.DeepCopy().WithTopology(topologyBase.DeepCopy().WithVariables(
+				clusterv1.ClusterVariable{Name: "location", Value: apiextensionsv1.JSON{Raw: []byte(`"us-west"`)}}).
+				Build()).
+				Build(),
+		},
+		{
+			name: "Default nested values of Cluster variables with values from ClusterClass",
+			clusterClass: classBuilder.DeepCopy().
+				WithWorkerMachineDeploymentClasses(*mdClass1).
+				WithStatusVariables([]clusterv1.ClusterClassStatusVariable{
+					{
+						Name: "location",
+						Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+							{
+								Required: true,
+								From:     clusterv1.VariableDefinitionFromInline,
+								Schema: clusterv1.VariableSchema{
+									OpenAPIV3Schema: clusterv1.JSONSchemaProps{
+										Type:    "string",
+										Default: &apiextensionsv1.JSON{Raw: []byte(`"us-east"`)},
+									},
+								},
+							},
+						},
+					},
+					{
+						Name: "httpProxy",
+						Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+							{
+								Required: true,
+								From:     clusterv1.VariableDefinitionFromInline,
+								Schema: clusterv1.VariableSchema{
+									OpenAPIV3Schema: clusterv1.JSONSchemaProps{
+										Type: "object",
+										Properties: map[string]clusterv1.JSONSchemaProps{
+											"enabled": {
+												Type: "boolean",
+											},
+											"url": {
+												Type:    "string",
+												Default: &apiextensionsv1.JSON{Raw: []byte(`"http://localhost:3128"`)},
+											},
+										},
+									},
+								},
+							},
+						},
+					}}...).
+				Build(),
+			initialCluster: clusterBuilder.DeepCopy().
+				WithTopology(topologyBase.DeepCopy().
+					WithVariables(
+						clusterv1.ClusterVariable{Name: "location", Value: apiextensionsv1.JSON{Raw: []byte(`"us-west"`)}},
+						clusterv1.ClusterVariable{Name: "httpProxy", Value: apiextensionsv1.JSON{Raw: []byte(`{"enabled":true}`)}}).
+					WithMachineDeployment(mdTopologyBase.DeepCopy().
+						WithVariables(clusterv1.ClusterVariable{
+							Name:  "httpProxy",
+							Value: apiextensionsv1.JSON{Raw: []byte(`{"enabled":true}`)},
+						}).Build()).
+					Build()).
+				Build(),
+			wantCluster: clusterBuilder.DeepCopy().WithTopology(
+				topologyBase.DeepCopy().
+					WithVariables(
+						clusterv1.ClusterVariable{Name: "location", Value: apiextensionsv1.JSON{Raw: []byte(`"us-west"`)}},
+						clusterv1.ClusterVariable{Name: "httpProxy", Value: apiextensionsv1.JSON{Raw: []byte(`{"enabled":true,"url":"http://localhost:3128"}`)}}).
+					WithMachineDeployment(
+						mdTopologyBase.DeepCopy().WithVariables(
+							clusterv1.ClusterVariable{
+								Name: "httpProxy",
+								Value: apiextensionsv1.JSON{
+									// url has been added by defaulting.
+									Raw: []byte(`{"enabled":true,"url":"http://localhost:3128"}`),
+								},
+							}).
+							Build()).
+					Build()).
+				Build(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initObjects := []client.Object{tt.initialCluster, tt.clusterClass}
+			fakeClient := fake.NewClientBuilder().WithScheme(fakeScheme).WithObjects(initObjects...).Build()
+			r := &Reconciler{
+				Client:    fakeClient,
+				APIReader: fakeClient,
+			}
+			// Ignore the error here as we expect the ClusterClass to fail in reconciliation as its references do not exist.
+			var _, _ = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: tt.initialCluster.Name, Namespace: tt.initialCluster.Namespace}})
+			got := &clusterv1.Cluster{}
+			g.Expect(fakeClient.Get(ctx, client.ObjectKey{Name: tt.initialCluster.Name, Namespace: tt.initialCluster.Namespace}, got)).To(Succeed())
+			// Compare the spec of the two clusters to ensure that variables are defaulted correctly.
+			g.Expect(reflect.DeepEqual(got.Spec, tt.wantCluster.Spec)).To(BeTrue(), cmp.Diff(got.Spec, tt.wantCluster.Spec))
+		})
+	}
+}
+
+func TestReconciler_ValidateCluster(t *testing.T) {
+	g := NewWithT(t)
+	mdTopologyBase := builder.MachineDeploymentTopology("md1").
+		WithClass("worker1").
+		WithReplicas(3)
+	classBuilder := builder.ClusterClass(metav1.NamespaceDefault, clusterClassName1)
+	topologyBase := builder.ClusterTopology().
+		WithClass(clusterClassName1).
+		WithVersion("1.22.2").
+		WithControlPlaneReplicas(3)
+	clusterBuilder := builder.Cluster(metav1.NamespaceDefault, clusterName1).
+		WithTopology(
+			topologyBase.Build())
+	tests := []struct {
+		name              string
+		clusterClass      *clusterv1.ClusterClass
+		cluster           *clusterv1.Cluster
+		wantValidationErr bool
+	}{
+		{
+			name: "Valid cluster should not throw validation error",
+			clusterClass: classBuilder.DeepCopy().
+				WithStatusVariables(clusterv1.ClusterClassStatusVariable{
+					Name: "httpProxy",
+				}).
+				Build(),
+			cluster: clusterBuilder.DeepCopy().
+				Build(),
+			wantValidationErr: false,
+		},
+		{
+			name: "Cluster invalid as it does not define a required variable",
+			clusterClass: classBuilder.DeepCopy().
+				WithStatusVariables(clusterv1.ClusterClassStatusVariable{
+					Name: "httpProxy",
+					Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+						{
+							Required: true,
+							From:     clusterv1.VariableDefinitionFromInline,
+						},
+					},
+				}).
+				Build(),
+			cluster: clusterBuilder.
+				Build(),
+			wantValidationErr: true,
+		},
+		{
+			name: "Cluster invalid as it defines an MDTopology without a corresponding MDClass",
+			clusterClass: classBuilder.DeepCopy().
+				WithStatusVariables(clusterv1.ClusterClassStatusVariable{
+					Name: "httpProxy",
+					Definitions: []clusterv1.ClusterClassStatusVariableDefinition{
+						{
+							Required: true,
+							From:     clusterv1.VariableDefinitionFromInline,
+						},
+					},
+				}).
+				Build(),
+			cluster: clusterBuilder.WithTopology(
+				builder.ClusterTopology().DeepCopy().
+					WithClass(clusterClassName1).
+					WithVersion("1.22.2").
+					WithControlPlaneReplicas(3).
+					WithMachineDeployment(mdTopologyBase.Build()).Build(),
+			).
+				Build(),
+			wantValidationErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initObjects := []client.Object{tt.cluster, tt.clusterClass}
+			fakeClient := fake.NewClientBuilder().WithScheme(fakeScheme).WithObjects(initObjects...).Build()
+			r := &Reconciler{
+				Client:    fakeClient,
+				APIReader: fakeClient,
+			}
+			var _, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKey{Name: tt.cluster.Name, Namespace: tt.cluster.Namespace}})
+			// Reconcile will always return an error here as the topology is incomplete. This test checks specifically for
+			// validation errors.
+			validationErrMessage := fmt.Sprintf("Cluster.cluster.x-k8s.io %q is invalid:", tt.cluster.Name)
+			if tt.wantValidationErr {
+				g.Expect(err.Error()).To(ContainSubstring(validationErrMessage))
+				return
+			}
+			g.Expect(err.Error()).ToNot(ContainSubstring(validationErrMessage))
+		})
+	}
 }

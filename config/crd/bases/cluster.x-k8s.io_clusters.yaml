@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.11.1
+    controller-gen.kubebuilder.io/version: v0.11.3
   creationTimestamp: null
   name: clusters.cluster.x-k8s.io
 spec:
@@ -288,7 +288,8 @@ spec:
     name: v1alpha4
     schema:
       openAPIV3Schema:
-        description: Cluster is the Schema for the clusters API.
+        description: "Cluster is the Schema for the clusters API. \n Deprecated: This
+          type will be removed in one of the next releases."
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -1017,9 +1018,18 @@ spec:
                       defined in the ClusterClass.
                     items:
                       description: ClusterVariable can be used to customize the Cluster
-                        through patches. It must comply to the corresponding ClusterClassVariable
-                        defined in the ClusterClass.
+                        through patches. Each ClusterVariable is associated with a
+                        Variable definition in the ClusterClass `status` variables.
                       properties:
+                        definitionFrom:
+                          description: 'DefinitionFrom specifies where the definition
+                            of this Variable is from. DefinitionFrom is `inline` when
+                            the definition is from the ClusterClass `.spec.variables`
+                            or the name of a patch defined in the ClusterClass `.spec.patches`
+                            where the patch is external and provides external variables.
+                            This field is mandatory if the variable has `DefinitionsConflict:
+                            true` in ClusterClass `status.variables[]`'
+                          type: string
                         name:
                           description: Name of the variable.
                           type: string
@@ -1334,10 +1344,21 @@ spec:
                                     level variables.
                                   items:
                                     description: ClusterVariable can be used to customize
-                                      the Cluster through patches. It must comply
-                                      to the corresponding ClusterClassVariable defined
-                                      in the ClusterClass.
+                                      the Cluster through patches. Each ClusterVariable
+                                      is associated with a Variable definition in
+                                      the ClusterClass `status` variables.
                                     properties:
+                                      definitionFrom:
+                                        description: 'DefinitionFrom specifies where
+                                          the definition of this Variable is from.
+                                          DefinitionFrom is `inline` when the definition
+                                          is from the ClusterClass `.spec.variables`
+                                          or the name of a patch defined in the ClusterClass
+                                          `.spec.patches` where the patch is external
+                                          and provides external variables. This field
+                                          is mandatory if the variable has `DefinitionsConflict:
+                                          true` in ClusterClass `status.variables[]`'
+                                        type: string
                                       name:
                                         description: Name of the variable.
                                         type: string

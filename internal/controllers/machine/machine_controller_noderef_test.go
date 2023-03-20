@@ -17,13 +17,17 @@ limitations under the License.
 package machine
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -31,6 +35,7 @@ import (
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/kubeconfig"
 )
 
 func TestGetNode(t *testing.T) {
@@ -164,6 +169,200 @@ func TestGetNode(t *testing.T) {
 	}
 }
 
+func TestNodeLabelSync(t *testing.T) {
+	defaultCluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: metav1.NamespaceDefault,
+		},
+	}
+
+	defaultMachine := clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "machine-test",
+			Namespace: metav1.NamespaceDefault,
+			Labels: map[string]string{
+				clusterv1.MachineControlPlaneLabel: "",
+			},
+		},
+		Spec: clusterv1.MachineSpec{
+			ClusterName: defaultCluster.Name,
+			Bootstrap: clusterv1.Bootstrap{
+				ConfigRef: &corev1.ObjectReference{
+					APIVersion: "bootstrap.cluster.x-k8s.io/v1beta1",
+					Kind:       "GenericBootstrapConfig",
+					Name:       "bootstrap-config1",
+				},
+			},
+			InfrastructureRef: corev1.ObjectReference{
+				APIVersion: "infrastructure.cluster.x-k8s.io/v1beta1",
+				Kind:       "GenericInfrastructureMachine",
+				Name:       "infra-config1",
+			},
+		},
+	}
+
+	t.Run("Should sync node labels", func(t *testing.T) {
+		g := NewWithT(t)
+
+		ns, err := env.CreateNamespace(ctx, "test-node-label-sync")
+		g.Expect(err).ToNot(HaveOccurred())
+		defer func() {
+			g.Expect(env.Cleanup(ctx, ns)).To(Succeed())
+		}()
+
+		nodeProviderID := fmt.Sprintf("test://%s", util.RandomString(6))
+
+		cluster := defaultCluster.DeepCopy()
+		cluster.Namespace = ns.Name
+
+		machine := defaultMachine.DeepCopy()
+		machine.Namespace = ns.Name
+		machine.Spec.ProviderID = pointer.String(nodeProviderID)
+
+		// Set Machine labels.
+		machine.Labels = map[string]string{}
+		// The expectation is that these labels will be synced to the Node.
+		managedMachineLabels := map[string]string{
+			clusterv1.NodeRoleLabelPrefix + "/anyRole": "",
+
+			clusterv1.ManagedNodeLabelDomain:                                  "valueFromMachine",
+			"custom-prefix." + clusterv1.ManagedNodeLabelDomain:               "valueFromMachine",
+			clusterv1.ManagedNodeLabelDomain + "/anything":                    "valueFromMachine",
+			"custom-prefix." + clusterv1.ManagedNodeLabelDomain + "/anything": "valueFromMachine",
+
+			clusterv1.NodeRestrictionLabelDomain:                                  "valueFromMachine",
+			"custom-prefix." + clusterv1.NodeRestrictionLabelDomain:               "valueFromMachine",
+			clusterv1.NodeRestrictionLabelDomain + "/anything":                    "valueFromMachine",
+			"custom-prefix." + clusterv1.NodeRestrictionLabelDomain + "/anything": "valueFromMachine",
+		}
+		for k, v := range managedMachineLabels {
+			machine.Labels[k] = v
+		}
+		// The expectation is that these labels will not be synced to the Node.
+		unmanagedMachineLabels := map[string]string{
+			"foo":                               "",
+			"bar":                               "",
+			"company.xyz/node.cluster.x-k8s.io": "not-managed",
+			"gpu-node.cluster.x-k8s.io":         "not-managed",
+			"company.xyz/node-restriction.kubernetes.io": "not-managed",
+			"gpu-node-restriction.kubernetes.io":         "not-managed",
+		}
+		for k, v := range unmanagedMachineLabels {
+			machine.Labels[k] = v
+		}
+
+		// Create Node.
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				GenerateName: "machine-test-node-",
+			},
+			Spec: corev1.NodeSpec{ProviderID: nodeProviderID},
+		}
+
+		// Set Node labels
+		// The expectation is that these labels will be overwritten by the labels
+		// from the Machine by the node label sync.
+		node.Labels = map[string]string{}
+		managedNodeLabelsToBeOverWritten := map[string]string{
+			clusterv1.NodeRoleLabelPrefix + "/anyRole": "valueFromNode",
+
+			clusterv1.ManagedNodeLabelDomain:                                  "valueFromNode",
+			"custom-prefix." + clusterv1.ManagedNodeLabelDomain:               "valueFromNode",
+			clusterv1.ManagedNodeLabelDomain + "/anything":                    "valueFromNode",
+			"custom-prefix." + clusterv1.ManagedNodeLabelDomain + "/anything": "valueFromNode",
+
+			clusterv1.NodeRestrictionLabelDomain:                                  "valueFromNode",
+			"custom-prefix." + clusterv1.NodeRestrictionLabelDomain:               "valueFromNode",
+			clusterv1.NodeRestrictionLabelDomain + "/anything":                    "valueFromNode",
+			"custom-prefix." + clusterv1.NodeRestrictionLabelDomain + "/anything": "valueFromNode",
+		}
+		for k, v := range managedNodeLabelsToBeOverWritten {
+			node.Labels[k] = v
+		}
+		// The expectation is that these labels will be preserved by the node label sync.
+		unmanagedNodeLabelsToBePreserved := map[string]string{
+			"node-role.kubernetes.io/control-plane": "",
+			"label":                                 "valueFromNode",
+		}
+		for k, v := range unmanagedNodeLabelsToBePreserved {
+			node.Labels[k] = v
+		}
+
+		g.Expect(env.Create(ctx, node)).To(Succeed())
+		defer func() {
+			g.Expect(env.Cleanup(ctx, node)).To(Succeed())
+		}()
+
+		g.Expect(env.Create(ctx, cluster)).To(Succeed())
+		defaultKubeconfigSecret := kubeconfig.GenerateSecret(cluster, kubeconfig.FromEnvTestConfig(env.Config, cluster))
+		g.Expect(env.Create(ctx, defaultKubeconfigSecret)).To(Succeed())
+		g.Expect(env.Create(ctx, machine)).To(Succeed())
+
+		// Validate that the right labels where synced to the Node.
+		g.Eventually(func(g Gomega) bool {
+			if err := env.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+				return false
+			}
+
+			// Managed Machine Labels should have been synced to the Node.
+			for k, v := range managedMachineLabels {
+				g.Expect(node.Labels).To(HaveKeyWithValue(k, v))
+			}
+			// Unmanaged Machine labels should not have been synced to the Node.
+			for k, v := range unmanagedMachineLabels {
+				g.Expect(node.Labels).ToNot(HaveKeyWithValue(k, v))
+			}
+
+			// Pre-existing managed Node labels should have been overwritten on the Node.
+			for k, v := range managedNodeLabelsToBeOverWritten {
+				g.Expect(node.Labels).ToNot(HaveKeyWithValue(k, v))
+			}
+			// Pre-existing unmanaged Node labels should have been preserved on the Node.
+			for k, v := range unmanagedNodeLabelsToBePreserved {
+				g.Expect(node.Labels).To(HaveKeyWithValue(k, v))
+			}
+
+			return true
+		}, 10*time.Second).Should(BeTrue())
+
+		// Remove managed labels from Machine.
+		modifiedMachine := machine.DeepCopy()
+		for k := range managedMachineLabels {
+			delete(modifiedMachine.Labels, k)
+		}
+		g.Expect(env.Patch(ctx, modifiedMachine, client.MergeFrom(machine))).To(Succeed())
+
+		// Validate that managed Machine labels were removed from the Node and all others are not changed.
+		g.Eventually(func(g Gomega) bool {
+			if err := env.Get(ctx, client.ObjectKeyFromObject(node), node); err != nil {
+				return false
+			}
+
+			// Managed Machine Labels should have been removed from the Node now.
+			for k, v := range managedMachineLabels {
+				g.Expect(node.Labels).ToNot(HaveKeyWithValue(k, v))
+			}
+			// Unmanaged Machine labels should not have been synced at all to the Node.
+			for k, v := range unmanagedMachineLabels {
+				g.Expect(node.Labels).ToNot(HaveKeyWithValue(k, v))
+			}
+
+			// Pre-existing managed Node labels have been overwritten earlier by the managed Machine labels.
+			// Now that the managed Machine labels have been removed, they should still not exist.
+			for k, v := range managedNodeLabelsToBeOverWritten {
+				g.Expect(node.Labels).ToNot(HaveKeyWithValue(k, v))
+			}
+			// Pre-existing unmanaged Node labels should have been preserved on the Node.
+			for k, v := range unmanagedNodeLabelsToBePreserved {
+				g.Expect(node.Labels).To(HaveKeyWithValue(k, v))
+			}
+
+			return true
+		}, 10*time.Second).Should(BeTrue())
+	})
+}
+
 func TestSummarizeNodeConditions(t *testing.T) {
 	testCases := []struct {
 		name       string
@@ -230,11 +429,19 @@ func TestSummarizeNodeConditions(t *testing.T) {
 
 func TestGetManagedLabels(t *testing.T) {
 	// Create managedLabels map from known managed prefixes.
-	managedLabels := map[string]string{}
-	managedLabels[clusterv1.ManagedNodeLabelDomain] = ""
-	managedLabels["custom-prefix."+clusterv1.NodeRestrictionLabelDomain] = ""
-	managedLabels["custom-prefix."+clusterv1.NodeRestrictionLabelDomain+"/anything"] = ""
-	managedLabels[clusterv1.NodeRoleLabelPrefix+"/anything"] = ""
+	managedLabels := map[string]string{
+		clusterv1.NodeRoleLabelPrefix + "/anyRole": "",
+
+		clusterv1.ManagedNodeLabelDomain:                                  "",
+		"custom-prefix." + clusterv1.ManagedNodeLabelDomain:               "",
+		clusterv1.ManagedNodeLabelDomain + "/anything":                    "",
+		"custom-prefix." + clusterv1.ManagedNodeLabelDomain + "/anything": "",
+
+		clusterv1.NodeRestrictionLabelDomain:                                  "",
+		"custom-prefix." + clusterv1.NodeRestrictionLabelDomain:               "",
+		clusterv1.NodeRestrictionLabelDomain + "/anything":                    "",
+		"custom-prefix." + clusterv1.NodeRestrictionLabelDomain + "/anything": "",
+	}
 
 	// Append arbitrary labels.
 	allLabels := map[string]string{
@@ -252,4 +459,71 @@ func TestGetManagedLabels(t *testing.T) {
 	g := NewWithT(t)
 	got := getManagedLabels(allLabels)
 	g.Expect(got).To(BeEquivalentTo(managedLabels))
+}
+
+func TestReconcileNodeTaints(t *testing.T) {
+	tests := []struct {
+		name string
+		node *corev1.Node
+	}{
+		{
+			name: "if the node has the uninitialized taint it should be dropped from the node",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node-1",
+				},
+				Spec: corev1.NodeSpec{
+					Taints: []corev1.Taint{
+						clusterv1.NodeUninitializedTaint,
+					},
+				},
+			},
+		},
+		{
+			name: "if the node is a control plane and has the uninitialized taint it should be dropped from the node",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node-1",
+				},
+				Spec: corev1.NodeSpec{
+					Taints: []corev1.Taint{
+						{
+							Key:    "node-role.kubernetes.io/control-plane",
+							Effect: corev1.TaintEffectNoSchedule,
+						},
+						clusterv1.NodeUninitializedTaint,
+					},
+				},
+			},
+		},
+		{
+			name: "if the node does not have the uninitialized taint it should remain absent from the node",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-node-1",
+				},
+				Spec: corev1.NodeSpec{
+					Taints: []corev1.Taint{},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+			fakeClient := fake.NewClientBuilder().WithObjects(tt.node).WithScheme(fakeScheme).Build()
+			nodeBefore := tt.node.DeepCopy()
+			r := &Reconciler{}
+			g.Expect(r.reconcileNodeTaints(ctx, fakeClient, tt.node)).Should(Succeed())
+			// Verify the NodeUninitializedTaint is dropped.
+			g.Expect(tt.node.Spec.Taints).ShouldNot(ContainElement(clusterv1.NodeUninitializedTaint))
+			// Verify all other taints are same.
+			for _, taint := range nodeBefore.Spec.Taints {
+				if !taint.MatchTaint(&clusterv1.NodeUninitializedTaint) {
+					g.Expect(tt.node.Spec.Taints).Should(ContainElement(taint))
+				}
+			}
+		})
+	}
 }

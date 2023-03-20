@@ -35,6 +35,8 @@
 
 Read the following guide if you're interested in contributing to cluster-api.
 
+Contributors who are not used to working in the Kubernetes ecosystem should also take a look at the Kubernetes [New Contributor Course.](https://www.kubernetes.dev/docs/onboarding/)
+
 ## Contributor License Agreements
 
 We'd love to accept your patches! Before we can take them, we have to jump a couple of legal hurdles.
@@ -139,14 +141,16 @@ Cluster API maintains the most recent release/releases for all supported API and
 - The API version is determined from the GroupVersion defined in the top-level `api/` package.
 - The EOL date of each API Version is determined from the last release available once a new API version is published.
 
-| API Version  | Supported Until      |
-|--------------|----------------------|
-| **v1beta1**  | TBD (current stable) |
-| **v1alpha4** | EOL since 2022-04-06 |
-| **v1alpha3** | EOL since 2022-02-23 |
+| API Version  | Supported Until                                                                         |
+|--------------|-----------------------------------------------------------------------------------------|
+| **v1beta1**  | TBD (current stable)                                                                    |
+| **v1alpha4** | EOL since 2022-04-06 ([apiVersion removal](#removal-of-v1alpha3--v1alpha4-apiversions)) |
+| **v1alpha3** | EOL since 2022-02-23 ([apiVersion removal](#removal-of-v1alpha3--v1alpha4-apiversions)) |
 
-- For the latest API version we support the two most recent minor releases; older minor releases are immediately unsupported when a new major/minor release is available. 
+- For the current stable API version (v1beta1) we support the two most recent minor releases; older minor releases are immediately unsupported when a new major/minor release is available.
 - For older API versions we only support the most recent minor release until the API version reaches EOL.
+- We will maintain test coverage for all supported minor releases and for one additional release for the current stable API version in case we have to do an emergency patch release.
+  For example, if v1.2 and v1.3 are currently supported, we will also maintain test coverage for v1.1 for one additional release cycle. When v1.4 is released, tests for v1.1 will be removed.
 
 | Minor Release | API Version  | Supported Until                                      |
 |---------------|--------------|------------------------------------------------------|
@@ -160,6 +164,18 @@ Cluster API maintains the most recent release/releases for all supported API and
 (*) Previous support policy applies, older minor releases were immediately unsupported when a new major/minor release was available
 
 - Exceptions can be filed with maintainers and taken into consideration on a case-by-case basis.
+
+### Removal of v1alpha3 & v1alpha4 apiVersions
+
+We are going to remove the apiVersions in upcoming releases:
+* v1.5:
+  * Kubernetes API server will stop serving the v1alpha3 apiVersion
+* v1.6:
+  * v1alpha3 apiVersion will be removed from the CRDs
+  * Kubernetes API server will stop serving the v1alpha4 apiVersion
+* v1.7
+  * v1alpha4 apiVersion will be removed from the CRDs
+For more details and latest information please see the following issue: [Removing v1alpha3 & v1alpha4 apiVersions](https://github.com/kubernetes-sigs/cluster-api/issues/8038).
 
 ## Contributing a Patch
 

@@ -34,6 +34,7 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -61,6 +62,24 @@ import (
 const (
 	// KubeadmConfigControllerName defines the controller used when creating clients.
 	KubeadmConfigControllerName = "kubeadmconfig-controller"
+)
+
+var (
+	// controlPlaneTaint is the taint that kubeadm applies to the control plane nodes
+	// for Kubernetes version >= v1.24.0.
+	// The values are copied from kubeadm codebase.
+	controlPlaneTaint = corev1.Taint{
+		Key:    "node-role.kubernetes.io/control-plane",
+		Effect: corev1.TaintEffectNoSchedule,
+	}
+
+	// oldControlPlaneTaint is the taint that kubeadm applies to the control plane nodes
+	// for Kubernetes version < v1.25.0.
+	// The values are copied from kubeadm codebase.
+	oldControlPlaneTaint = corev1.Taint{
+		Key:    "node-role.kubernetes.io/master",
+		Effect: corev1.TaintEffectNoSchedule,
+	}
 )
 
 const (
@@ -124,26 +143,23 @@ func (r *KubeadmConfigReconciler) SetupWithManager(ctx context.Context, mgr ctrl
 		b = b.Watches(
 			&source.Kind{Type: &expv1.MachinePool{}},
 			handler.EnqueueRequestsFromMapFunc(r.MachinePoolToBootstrapMapFunc),
-		).WithEventFilter(predicates.ResourceNotPausedAndHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue))
+		)
 	}
 
-	c, err := b.Build(r)
-	if err != nil {
-		return errors.Wrap(err, "failed setting up with a controller manager")
-	}
-
-	err = c.Watch(
+	b = b.Watches(
 		&source.Kind{Type: &clusterv1.Cluster{}},
 		handler.EnqueueRequestsFromMapFunc(r.ClusterToKubeadmConfigs),
-		predicates.All(ctrl.LoggerFrom(ctx),
-			predicates.ClusterUnpausedAndInfrastructureReady(ctrl.LoggerFrom(ctx)),
-			predicates.ResourceHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue),
+		builder.WithPredicates(
+			predicates.All(ctrl.LoggerFrom(ctx),
+				predicates.ClusterUnpausedAndInfrastructureReady(ctrl.LoggerFrom(ctx)),
+				predicates.ResourceHasFilterLabel(ctrl.LoggerFrom(ctx), r.WatchFilterValue),
+			),
 		),
 	)
-	if err != nil {
-		return errors.Wrap(err, "failed adding Watch for Clusters to controller manager")
-	}
 
+	if err := b.Complete(r); err != nil {
+		return errors.Wrap(err, "failed setting up with a controller manager")
+	}
 	return nil
 }
 
@@ -368,7 +384,7 @@ func (r *KubeadmConfigReconciler) handleClusterNotInitialized(ctx context.Contex
 
 	// if the machine has not ClusterConfiguration and InitConfiguration, requeue
 	if scope.Config.Spec.InitConfiguration == nil && scope.Config.Spec.ClusterConfiguration == nil {
-		scope.Info("Control plane is not ready, requeing joining control planes until ready.")
+		scope.Info("Control plane is not ready, requeuing joining control planes until ready.")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -381,7 +397,7 @@ func (r *KubeadmConfigReconciler) handleClusterNotInitialized(ctx context.Contex
 	// as control plane get processed here
 	// if not the first, requeue
 	if !r.KubeadmInitLock.Lock(ctx, scope.Cluster, machine) {
-		scope.Info("A control plane is already being initialized, requeing until control plane is ready")
+		scope.Info("A control plane is already being initialized, requeuing until control plane is ready")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -415,7 +431,15 @@ func (r *KubeadmConfigReconciler) handleClusterNotInitialized(ctx context.Contex
 			},
 		}
 	}
-	initdata, err := kubeadmtypes.MarshalInitConfigurationForVersion(scope.Config.Spec.InitConfiguration, parsedVersion)
+
+	// Add the node uninitialized taint to the list of taints.
+	// DeepCopy the InitConfiguration to prevent updating the actual KubeadmConfig.
+	// Do not modify the KubeadmConfig in etcd as this is a temporary taint that will be dropped after the node
+	// is initialized by ClusterAPI.
+	initConfiguration := scope.Config.Spec.InitConfiguration.DeepCopy()
+	addNodeUninitializedTaint(&initConfiguration.NodeRegistration, true, parsedVersion)
+
+	initdata, err := kubeadmtypes.MarshalInitConfigurationForVersion(initConfiguration, parsedVersion)
 	if err != nil {
 		scope.Error(err, "Failed to marshal init configuration")
 		return ctrl.Result{}, err
@@ -551,7 +575,14 @@ func (r *KubeadmConfigReconciler) joinWorker(ctx context.Context, scope *Scope) 
 		return ctrl.Result{}, errors.Wrapf(err, "failed to parse kubernetes version %q", kubernetesVersion)
 	}
 
-	joinData, err := kubeadmtypes.MarshalJoinConfigurationForVersion(scope.Config.Spec.JoinConfiguration, parsedVersion)
+	// Add the node uninitialized taint to the list of taints.
+	// DeepCopy the JoinConfiguration to prevent updating the actual KubeadmConfig.
+	// Do not modify the KubeadmConfig in etcd as this is a temporary taint that will be dropped after the node
+	// is initialized by ClusterAPI.
+	joinConfiguration := scope.Config.Spec.JoinConfiguration.DeepCopy()
+	addNodeUninitializedTaint(&joinConfiguration.NodeRegistration, false, parsedVersion)
+
+	joinData, err := kubeadmtypes.MarshalJoinConfigurationForVersion(joinConfiguration, parsedVersion)
 	if err != nil {
 		scope.Error(err, "Failed to marshal join configuration")
 		return ctrl.Result{}, err
@@ -657,7 +688,14 @@ func (r *KubeadmConfigReconciler) joinControlplane(ctx context.Context, scope *S
 		return ctrl.Result{}, errors.Wrapf(err, "failed to parse kubernetes version %q", kubernetesVersion)
 	}
 
-	joinData, err := kubeadmtypes.MarshalJoinConfigurationForVersion(scope.Config.Spec.JoinConfiguration, parsedVersion)
+	// Add the node uninitialized taint to the list of taints.
+	// DeepCopy the JoinConfiguration to prevent updating the actual KubeadmConfig.
+	// Do not modify the KubeadmConfig in etcd as this is a temporary taint that will be dropped after the node
+	// is initialized by ClusterAPI.
+	joinConfiguration := scope.Config.Spec.JoinConfiguration.DeepCopy()
+	addNodeUninitializedTaint(&joinConfiguration.NodeRegistration, true, parsedVersion)
+
+	joinData, err := kubeadmtypes.MarshalJoinConfigurationForVersion(joinConfiguration, parsedVersion)
 	if err != nil {
 		scope.Error(err, "Failed to marshal join configuration")
 		return ctrl.Result{}, err
@@ -1065,4 +1103,44 @@ func (r *KubeadmConfigReconciler) ensureBootstrapSecretOwnersRef(ctx context.Con
 		return errors.Wrapf(err, "could not add KubeadmConfig %s as ownerReference to bootstrap Secret %s", scope.ConfigOwner.GetName(), secret.GetName())
 	}
 	return nil
+}
+
+// addNodeUninitializedTaint adds the NodeUninitializedTaint to the nodeRegistration.
+// Note: If isControlPlane is true then it also adds the control plane taint if the initial set of taints is nil.
+// This is to ensure consistency with kubeadm's defaulting behavior.
+func addNodeUninitializedTaint(nodeRegistration *bootstrapv1.NodeRegistrationOptions, isControlPlane bool, kubernetesVersion semver.Version) {
+	var taints []corev1.Taint
+	taints = nodeRegistration.Taints
+	if hasTaint(taints, clusterv1.NodeUninitializedTaint) {
+		return
+	}
+
+	// For a control plane, kubeadm adds the default control plane taint if the provided taints are nil.
+	// Since we are adding the uninitialized taint we also have to add the default taints kubeadm would have added if
+	// the taints were nil.
+	if isControlPlane && taints == nil {
+		// Note: Kubeadm uses a different default control plane taint depending on the kubernetes version.
+		// Ref: https://github.com/kubernetes/kubeadm/issues/2200
+		if kubernetesVersion.LT(semver.MustParse("1.24.0")) {
+			taints = []corev1.Taint{oldControlPlaneTaint}
+		} else if kubernetesVersion.GTE(semver.MustParse("1.24.0")) && kubernetesVersion.LT(semver.MustParse("1.25.0")) {
+			taints = []corev1.Taint{
+				oldControlPlaneTaint,
+				controlPlaneTaint,
+			}
+		} else {
+			taints = []corev1.Taint{controlPlaneTaint}
+		}
+	}
+	taints = append(taints, clusterv1.NodeUninitializedTaint)
+	nodeRegistration.Taints = taints
+}
+
+func hasTaint(taints []corev1.Taint, targetTaint corev1.Taint) bool {
+	for _, taint := range taints {
+		if taint.MatchTaint(&targetTaint) {
+			return true
+		}
+	}
+	return false
 }

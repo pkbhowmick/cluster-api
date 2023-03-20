@@ -47,6 +47,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/feature"
 	"sigs.k8s.io/cluster-api/util/conditions"
 )
 
@@ -370,8 +371,15 @@ func (t *ClusterCacheTracker) runningOnWorkloadCluster(ctx context.Context, c cl
 
 // createClient creates a client and a mapper based on a rest.Config.
 func (t *ClusterCacheTracker) createClient(config *rest.Config, cluster client.ObjectKey) (client.Client, meta.RESTMapper, error) {
+	var mapper meta.RESTMapper
+	var err error
+
 	// Create a mapper for it
-	mapper, err := apiutil.NewDynamicRESTMapper(config)
+	if !feature.Gates.Enabled(feature.LazyRestmapper) {
+		mapper, err = apiutil.NewDynamicRESTMapper(config)
+	} else {
+		mapper, err = apiutil.NewDynamicRESTMapper(config, apiutil.WithExperimentalLazyMapper)
+	}
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "error creating dynamic rest mapper for remote cluster %q", cluster.String())
 	}
@@ -445,7 +453,7 @@ func (t *ClusterCacheTracker) Watch(ctx context.Context, input WatchInput) error
 	// We have to lock the cluster, so that the watch is not created multiple times in parallel.
 	ok := t.clusterLock.TryLock(input.Cluster)
 	if !ok {
-		return errors.Wrapf(ErrClusterLocked, "failed to add %s watch on cluster %s: failed to get lock for cluster", input.Kind, klog.KRef(input.Cluster.Namespace, input.Cluster.Name))
+		return errors.Wrapf(ErrClusterLocked, "failed to add %T watch on cluster %s: failed to get lock for cluster", input.Kind, klog.KRef(input.Cluster.Namespace, input.Cluster.Name))
 	}
 	defer t.clusterLock.Unlock(input.Cluster)
 
@@ -528,6 +536,13 @@ func (t *ClusterCacheTracker) healthCheckCluster(ctx context.Context, in *health
 		}
 
 		if _, ok := t.loadAccessor(in.cluster); !ok {
+			// If there is no accessor but the cluster is locked, we're probably in the middle of the cluster accessor
+			// creation and we should requeue the health check until it's done.
+			if ok := t.clusterLock.TryLock(in.cluster); !ok {
+				t.log.V(4).Info("Waiting for cluster to be unlocked. Requeuing health check")
+				return false, nil
+			}
+			t.clusterLock.Unlock(in.cluster)
 			// Cache for this cluster has already been cleaned up.
 			// Nothing to do, so return true.
 			return true, nil

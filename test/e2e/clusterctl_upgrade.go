@@ -452,12 +452,12 @@ func ClusterctlUpgradeSpec(ctx context.Context, inputGetter func() ClusterctlUpg
 
 		// After upgrading we are sure the version is the latest version of the API,
 		// so it is possible to use the standard helpers
-
 		workloadCluster := framework.GetClusterByName(ctx, framework.GetClusterByNameInput{
 			Getter:    managementClusterProxy.GetClient(),
 			Namespace: testNamespace.Name,
 			Name:      workLoadClusterName,
 		})
+
 		if workloadCluster.Spec.Topology != nil {
 			// Cluster is using ClusterClass, scale up via topology.
 			framework.ScaleAndWaitMachineDeploymentTopology(ctx, framework.ScaleAndWaitMachineDeploymentTopologyInput{

@@ -338,6 +338,9 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 				},
 			},
 			Version: "v1.16.6",
+			RolloutBefore: &RolloutBefore{
+				CertificatesExpiryDays: pointer.Int32(7),
+			},
 		},
 	}
 
@@ -406,6 +409,11 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 	validUpdate.Spec.RolloutAfter = &now
 	validUpdate.Spec.RolloutBefore = &RolloutBefore{
 		CertificatesExpiryDays: pointer.Int32(14),
+	}
+	validUpdate.Spec.RemediationStrategy = &RemediationStrategy{
+		MaxRetry:         pointer.Int32(50),
+		MinHealthyPeriod: &metav1.Duration{Duration: 10 * time.Hour},
+		RetryPeriod:      metav1.Duration{Duration: 10 * time.Minute},
 	}
 	validUpdate.Spec.KubeadmConfigSpec.Format = bootstrapv1.CloudConfig
 
@@ -613,6 +621,9 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 	invalidRolloutBeforeCertificateExpiryDays.Spec.RolloutBefore = &RolloutBefore{
 		CertificatesExpiryDays: pointer.Int32(5), // less than minimum
 	}
+
+	unsetRolloutBefore := before.DeepCopy()
+	unsetRolloutBefore.Spec.RolloutBefore = nil
 
 	invalidIgnitionConfiguration := before.DeepCopy()
 	invalidIgnitionConfiguration.Spec.KubeadmConfigSpec.Ignition = &bootstrapv1.IgnitionSpec{}
@@ -971,6 +982,12 @@ func TestKubeadmControlPlaneValidateUpdate(t *testing.T) {
 			kcp:       invalidRolloutBeforeCertificateExpiryDays,
 		},
 		{
+			name:      "should allow unsetting rolloutBefore",
+			expectErr: false,
+			before:    before,
+			kcp:       unsetRolloutBefore,
+		},
+		{
 			name:                  "should return error when Ignition configuration is invalid",
 			enableIgnitionFeature: true,
 			expectErr:             true,
@@ -1155,9 +1172,9 @@ func TestValidateVersion(t *testing.T) {
 
 			allErrs := kcp.validateVersion(tt.oldVersion)
 			if tt.expectErr {
-				g.Expect(allErrs).ToNot(HaveLen(0))
+				g.Expect(allErrs).ToNot(BeEmpty())
 			} else {
-				g.Expect(allErrs).To(HaveLen(0))
+				g.Expect(allErrs).To(BeEmpty())
 			}
 		})
 	}

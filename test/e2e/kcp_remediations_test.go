@@ -1,5 +1,8 @@
+//go:build e2e
+// +build e2e
+
 /*
-Copyright 2019 The Kubernetes Authors.
+Copyright 2020 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,16 +17,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package loadbalancer
+package e2e
 
-// Image defines the loadbalancer image name
-const Image = "haproxy"
+import (
+	. "github.com/onsi/ginkgo/v2"
+)
 
-// DefaultImageRepository defines the loadbalancer image repository
-const DefaultImageRepository = "kindest"
-
-// DefaultImageTag defines the loadbalancer image tag
-const DefaultImageTag = "v20210715-a6da3463"
-
-// ConfigPath defines the path to the config file in the image
-const ConfigPath = "/usr/local/etc/haproxy/haproxy.cfg"
+var _ = Describe("When testing KCP remediation", func() {
+	KCPRemediationSpec(ctx, func() KCPRemediationSpecInput {
+		return KCPRemediationSpecInput{
+			E2EConfig:             e2eConfig,
+			ClusterctlConfigPath:  clusterctlConfigPath,
+			BootstrapClusterProxy: bootstrapClusterProxy,
+			ArtifactFolder:        artifactFolder,
+			SkipCleanup:           skipCleanup,
+		}
+	})
+})

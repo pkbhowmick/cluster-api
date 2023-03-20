@@ -23,14 +23,15 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 )
 
-var _ = Describe("When testing unhealthy machines remediation", func() {
-	MachineRemediationSpec(ctx, func() MachineRemediationSpecInput {
-		return MachineRemediationSpecInput{
+var _ = Describe("When testing ClusterClass rollouts [ClusterClass]", func() {
+	ClusterClassRolloutSpec(ctx, func() ClusterClassRolloutSpecInput {
+		return ClusterClassRolloutSpecInput{
 			E2EConfig:             e2eConfig,
 			ClusterctlConfigPath:  clusterctlConfigPath,
 			BootstrapClusterProxy: bootstrapClusterProxy,
 			ArtifactFolder:        artifactFolder,
 			SkipCleanup:           skipCleanup,
+			Flavor:                "topology",
 		}
 	})
 })

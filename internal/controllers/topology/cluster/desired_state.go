@@ -241,11 +241,20 @@ func (r *Reconciler) computeControlPlane(ctx context.Context, s *scope.Scope, in
 			return nil, errors.Wrap(err, "failed to spec.machineTemplate.infrastructureRef in the ControlPlane object")
 		}
 
-		// Apply the ControlPlane labels and annotations to the ControlPlane machines as well.
+		// Add the ControlPlane labels and annotations to the ControlPlane machines as well.
+		// Note: We have to ensure the machine template metadata copied from the control plane template is not overwritten.
+		controlPlaneMachineTemplateMetadata, err := contract.ControlPlane().MachineTemplate().Metadata().Get(controlPlane)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to get spec.machineTemplate.metadata from the ControlPlane object")
+		}
+
+		controlPlaneMachineTemplateMetadata.Labels = mergeMap(controlPlaneLabels, controlPlaneMachineTemplateMetadata.Labels)
+		controlPlaneMachineTemplateMetadata.Annotations = mergeMap(controlPlaneAnnotations, controlPlaneMachineTemplateMetadata.Annotations)
+
 		if err := contract.ControlPlane().MachineTemplate().Metadata().Set(controlPlane,
 			&clusterv1.ObjectMeta{
-				Labels:      controlPlaneLabels,
-				Annotations: controlPlaneAnnotations,
+				Labels:      controlPlaneMachineTemplateMetadata.Labels,
+				Annotations: controlPlaneMachineTemplateMetadata.Annotations,
 			}); err != nil {
 			return nil, errors.Wrap(err, "failed to set spec.machineTemplate.metadata in the ControlPlane object")
 		}
@@ -605,7 +614,7 @@ func computeMachineDeployment(_ context.Context, s *scope.Scope, desiredControlP
 	// Add ClusterTopologyMachineDeploymentLabel to the generated InfrastructureMachine template
 	infraMachineTemplateLabels[clusterv1.ClusterTopologyMachineDeploymentNameLabel] = machineDeploymentTopology.Name
 	desiredMachineDeployment.InfrastructureMachineTemplate.SetLabels(infraMachineTemplateLabels)
-	version, err := computeMachineDeploymentVersion(s, desiredControlPlaneState, currentMachineDeployment)
+	version, err := computeMachineDeploymentVersion(s, machineDeploymentTopology, desiredControlPlaneState, currentMachineDeployment)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to compute version for %s", machineDeploymentTopology.Name)
 	}
@@ -687,6 +696,9 @@ func computeMachineDeployment(_ context.Context, s *scope.Scope, desiredControlP
 
 	// Apply annotations
 	machineDeploymentAnnotations := mergeMap(machineDeploymentTopology.Metadata.Annotations, machineDeploymentBlueprint.Metadata.Annotations)
+	// Ensure the annotations used to control the upgrade sequence are never propagated.
+	delete(machineDeploymentAnnotations, clusterv1.ClusterTopologyHoldUpgradeSequenceAnnotation)
+	delete(machineDeploymentAnnotations, clusterv1.ClusterTopologyDeferUpgradeAnnotation)
 	desiredMachineDeploymentObj.SetAnnotations(machineDeploymentAnnotations)
 	desiredMachineDeploymentObj.Spec.Template.Annotations = machineDeploymentAnnotations
 
@@ -738,7 +750,7 @@ func computeMachineDeployment(_ context.Context, s *scope.Scope, desiredControlP
 // Nb: No MachineDeployment upgrades will be triggered while any MachineDeployment is in the middle
 // of an upgrade. Even if the number of MachineDeployments that are being upgraded is less
 // than the number of allowed concurrent upgrades.
-func computeMachineDeploymentVersion(s *scope.Scope, desiredControlPlaneState *scope.ControlPlaneState, currentMDState *scope.MachineDeploymentState) (string, error) {
+func computeMachineDeploymentVersion(s *scope.Scope, machineDeploymentTopology clusterv1.MachineDeploymentTopology, desiredControlPlaneState *scope.ControlPlaneState, currentMDState *scope.MachineDeploymentState) (string, error) {
 	desiredVersion := s.Blueprint.Topology.Version
 	// If creating a new machine deployment, we can pick up the desired version
 	// Note: We are not blocking the creation of new machine deployments when
@@ -753,6 +765,12 @@ func computeMachineDeploymentVersion(s *scope.Scope, desiredControlPlaneState *s
 	// Return early if the currentVersion is already equal to the desiredVersion
 	// no further checks required.
 	if currentVersion == desiredVersion {
+		return currentVersion, nil
+	}
+
+	// Return early if the upgrade for the MachineDeployment is deferred.
+	if isMachineDeploymentDeferred(s.Blueprint.Topology, machineDeploymentTopology) {
+		s.UpgradeTracker.MachineDeployments.MarkDeferredUpgrade(currentMDState.Object.Name)
 		return currentVersion, nil
 	}
 
@@ -835,6 +853,41 @@ func computeMachineDeploymentVersion(s *scope.Scope, desiredControlPlaneState *s
 	// Ready to pick up the topology version.
 	s.UpgradeTracker.MachineDeployments.MarkRollingOut(currentMDState.Object.Name)
 	return desiredVersion, nil
+}
+
+// isMachineDeploymentDeferred returns true if the upgrade for the mdTopology is deferred.
+// This is the case when either:
+//   - the mdTopology has the ClusterTopologyDeferUpgradeAnnotation annotation.
+//   - the mdTopology has the ClusterTopologyHoldUpgradeSequenceAnnotation annotation.
+//   - another md topology which is before mdTopology in the workers.machineDeployments list has the
+//     ClusterTopologyHoldUpgradeSequenceAnnotation annotation.
+func isMachineDeploymentDeferred(clusterTopology *clusterv1.Topology, mdTopology clusterv1.MachineDeploymentTopology) bool {
+	// If mdTopology has the ClusterTopologyDeferUpgradeAnnotation annotation => md is deferred.
+	if _, ok := mdTopology.Metadata.Annotations[clusterv1.ClusterTopologyDeferUpgradeAnnotation]; ok {
+		return true
+	}
+
+	// If mdTopology has the ClusterTopologyHoldUpgradeSequenceAnnotation annotation => md is deferred.
+	if _, ok := mdTopology.Metadata.Annotations[clusterv1.ClusterTopologyHoldUpgradeSequenceAnnotation]; ok {
+		return true
+	}
+
+	for _, md := range clusterTopology.Workers.MachineDeployments {
+		// If another md topology with the ClusterTopologyHoldUpgradeSequenceAnnotation annotation
+		// is found before the mdTopology => md is deferred.
+		if _, ok := md.Metadata.Annotations[clusterv1.ClusterTopologyHoldUpgradeSequenceAnnotation]; ok {
+			return true
+		}
+
+		// If mdTopology is found before a md topology with the ClusterTopologyHoldUpgradeSequenceAnnotation
+		// annotation => md is not deferred.
+		if md.Name == mdTopology.Name {
+			return false
+		}
+	}
+
+	// This case should be impossible as mdTopology should have been found in workers.machineDeployments.
+	return false
 }
 
 type templateToInput struct {
@@ -949,15 +1002,14 @@ func templateToTemplate(in templateToInput) *unstructured.Unstructured {
 	return template
 }
 
-// mergeMap merges two maps into another one.
-// NOTE: In case a key exists in both maps, the value in the first map is preserved.
-func mergeMap(a, b map[string]string) map[string]string {
+// mergeMap merges maps.
+// NOTE: In case a key exists in multiple maps, the value of the first map is preserved.
+func mergeMap(maps ...map[string]string) map[string]string {
 	m := make(map[string]string)
-	for k, v := range b {
-		m[k] = v
-	}
-	for k, v := range a {
-		m[k] = v
+	for i := len(maps) - 1; i >= 0; i-- {
+		for k, v := range maps[i] {
+			m[k] = v
+		}
 	}
 
 	// Nil the result if the map is empty, thus avoiding triggering infinite reconcile
