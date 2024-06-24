@@ -1065,6 +1065,7 @@ func (o *objectMover) deleteGroup(group moveGroup) error {
 
 var (
 	removeFinalizersPatch = client.RawPatch(types.MergePatchType, []byte("{\"metadata\":{\"finalizers\":[]}}"))
+	addMoveAnnotationPatch = client.RawPatch(types.JSONPatchType, []byte(fmt.Sprintf("[{\"op\": \"add\", \"path\":\"/metadata/annotations/%s\", \"value\":\"true\"}]", clusterv1.MoveAnnotation)))
 )
 
 // deleteSourceObject deletes the Kubernetes object corresponding to the node from the source management cluster, taking care of removing all the finalizers so
@@ -1103,6 +1104,11 @@ func (o *objectMover) deleteSourceObject(nodeToDelete *node) error {
 			return nil
 		}
 		return errors.Wrapf(err, "error reading %q %s/%s",
+			sourceObj.GroupVersionKind(), sourceObj.GetNamespace(), sourceObj.GetName())
+	}
+
+	if err := cFrom.Patch(ctx, sourceObj, addMoveAnnotationPatch); err != nil {
+		return errors.Wrapf(err, "error adding move annotation from %q %s/%s",
 			sourceObj.GroupVersionKind(), sourceObj.GetNamespace(), sourceObj.GetName())
 	}
 

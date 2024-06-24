@@ -91,6 +91,12 @@ const (
 	// on the reconciled object.
 	PausedAnnotation = "cluster.x-k8s.io/paused"
 
+	// MoveAnnotation is an annotation that will be applied to Cluster API
+	// object to mark that object is going to be moved to another management cluster.
+	//
+	// It will also help any validation webhook to take decision based on it.
+	MoveAnnotation = "cluster.x-k8s.io/move"
+
 	// DisableMachineCreateAnnotation is an annotation that can be used to signal a MachineSet to stop creating new machines.
 	// It is utilized in the OnDelete MachineDeploymentStrategy to allow the MachineDeployment controller to scale down
 	// older MachineSets when Machines are deleted and add the new replicas to the latest MachineSet.
